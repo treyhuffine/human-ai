@@ -14,7 +14,6 @@ import { env } from '../util/env';
 import type { Point } from '../result';
 
 const keypointsCount = 6;
-const faceBoxScaleFactor = 1.4;
 let model: GraphModel | null;
 let anchors: Tensor | null = null;
 let inputSize = 0;
@@ -56,9 +55,20 @@ export async function getBoxes(inputImage: Tensor4D, config: Config): Promise<De
   // sanity check on input
   if ((!inputImage) || (inputImage['isDisposedInternal']) || (inputImage.shape.length !== 4) || (inputImage.shape[1] < 1) || (inputImage.shape[2] < 1)) return [];
   const t: Record<string, Tensor> = {};
-  t.resized = tf.image.resizeBilinear(inputImage, [inputSize, inputSize]);
+  let pad = [0, 0];
+  let scale = [1, 1];
+  if (config?.face?.detector?.square) {
+    const xy = Math.max(inputImage.shape[2], inputImage.shape[1]);
+    pad = [Math.floor((xy - inputImage.shape[2]) / 2), Math.floor((xy - inputImage.shape[1]) / 2)];
+    t.padded = tf.pad(inputImage, [[0, 0], [pad[1], pad[1]], [pad[0], pad[0]], [0, 0]]);
+    scale = [inputImage.shape[2] / xy, inputImage.shape[1] / xy];
+    pad = [pad[0] / inputSize, pad[1] / inputSize];
+  } else {
+    t.padded = inputImage.clone();
+  }
+  t.resized = tf.image.resizeBilinear(t.padded as Tensor4D, [inputSize, inputSize]);
   t.div = tf.div(t.resized, constants.tf127);
-  t.normalized = tf.sub(t.div, constants.tf05);
+  t.normalized = tf.sub(t.div, constants.tf1);
   const res = model?.execute(t.normalized) as Tensor[];
   if (Array.isArray(res) && res.length > 2) { // pinto converted model?
     const sorted = res.sort((a, b) => a.size - b.size);
@@ -82,7 +92,6 @@ export async function getBoxes(inputImage: Tensor4D, config: Config): Promise<De
   const scores = await t.scores.data();
   for (let i = 0; i < nms.length; i++) {
     const confidence = scores[nms[i]];
-
     if (confidence > (config.face.detector?.minConfidence || 0)) {
       const b: Record<string, Tensor> = {};
       b.bbox = tf.slice(t.boxes, [nms[i], 0], [1, -1]);
@@ -90,16 +99,22 @@ export async function getBoxes(inputImage: Tensor4D, config: Config): Promise<De
       b.squeeze = tf.squeeze(b.slice);
       b.landmarks = tf.reshape(b.squeeze, [keypointsCount, -1]);
       const points = await b.bbox.data();
+      const unpadded = [ // TODO fix this math
+        points[0] * scale[0] - pad[0],
+        points[1] * scale[1] - pad[1],
+        points[2] * scale[0] - pad[0],
+        points[3] * scale[1] - pad[1],
+      ];
       const rawBox = {
-        startPoint: [points[0], points[1]] as Point,
-        endPoint: [points[2], points[3]] as Point,
+        startPoint: [unpadded[0], unpadded[1]] as Point,
+        endPoint: [unpadded[2], unpadded[3]] as Point,
         landmarks: (await b.landmarks.array()) as Point[],
         confidence,
       };
       b.anchor = tf.slice(anchors as Tensor, [nms[i], 0], [1, 2]);
       const anchor = await b.anchor.data();
       const scaledBox = util.scaleBoxCoordinates(rawBox, [(inputImage.shape[2] || 0) / inputSize, (inputImage.shape[1] || 0) / inputSize], anchor);
-      const enlargedBox = util.enlargeBox(scaledBox, config.face['scale'] || faceBoxScaleFactor);
+      const enlargedBox = util.enlargeBox(scaledBox, config.face.detector?.scale || 1.4);
       const squaredBox = util.squarifyBox(enlargedBox);
       if (squaredBox.size[0] > (config.face.detector?.['minSize'] || 0) && squaredBox.size[1] > (config.face.detector?.['minSize'] || 0)) boxes.push(squaredBox);
       Object.keys(b).forEach((tensor) => tf.dispose(b[tensor]));

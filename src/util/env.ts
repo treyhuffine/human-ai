@@ -99,7 +99,7 @@ export class Env {
   set ImageData(val) { this.#imageData = val; globalThis.ImageData = val; }
 
   constructor() {
-    this.browser = typeof navigator !== 'undefined';
+    this.browser = (typeof navigator !== 'undefined') && (typeof navigator.appVersion !== 'undefined');
     this.node = (typeof process !== 'undefined') && (typeof process.versions !== 'undefined') && (typeof process.versions.node !== 'undefined');
     this.tfjs = { version: tf.version['tfjs-core'] };
     this.offscreen = typeof OffscreenCanvas !== 'undefined';
